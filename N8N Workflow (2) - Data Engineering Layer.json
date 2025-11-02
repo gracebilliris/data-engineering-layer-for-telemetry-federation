@@ -1,0 +1,193 @@
+{
+    "name": "Data Engineering Layer",
+    "nodes": [
+        {
+            "parameters": {
+                "options": {}
+            },
+            "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+            "typeVersion": 1,
+            "position": [-288, 480],
+            "id": "367dc3b2-becf-4d1a-8a93-3ad8003abecd",
+            "name": "Google Gemini Chat Model"
+        },
+        {
+            "parameters": {
+                "promptType": "define",
+                "text": "=You are a telemetry parser. Given the raw string below, output a JSON object.\nRules:  \n• Extract values from the input. If missing, use null.  \n• For job, if you see event_type and action, use \"event_type:action\".  \n• If agent_id or target_agent_id is missing, derive actor/target from source_agent/target_agent.  \n• Convert any date/time you see into ISO 8601 format; else timestamp = null.  \n• Include the full input in raw field.  \n• If parsing fails, set parseError true and all other fields null.  \n\nRaw input:  \n{{ JSON.stringify($json.message) }}",
+                "hasOutputParser": true,
+                "options": {
+                    "maxIterations": 1
+                }
+            },
+            "type": "@n8n/n8n-nodes-langchain.agent",
+            "typeVersion": 3,
+            "position": [-288, 224],
+            "id": "ec95b68f-77de-41a0-9210-42d0a4d4daf0",
+            "name": "Transform & Normalise",
+            "alwaysOutputData": false,
+            "retryOnFail": false
+        },
+        {
+            "parameters": {
+                "mode": "runOnceForEachItem",
+                "jsCode": "// Code Node — Mode: Run Once for Each Item\nconst item = $input.item.json;\n\n// 1. Access the `output` object\nconst out = item.output && typeof item.output === 'object' ? item.output : {};\n\n// 2. Build normalized schema object with defaults\nconst doc = {\n  trace_id:   out.trace_id   ?? null,\n  job:        out.job        ?? null,\n  actor:      out.actor      ?? null,\n  target:     out.target     ?? null,\n  region:     out.region     ?? null,\n  host:       out.host       ?? null,\n  message:    out.message    ?? null,\n  timestamp:  out.timestamp  ?? null,\n  parseError: out.parseError ?? true\n};\n\n// 3. Return the normalized object\nreturn { json: doc };\n"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [64, 224],
+            "id": "1861bc9b-1ac5-4347-832f-8a128501974c",
+            "name": "Extract Normalised Response"
+        },
+        {
+            "parameters": {
+                "operation": "insert",
+                "collection": "telemetry_raw",
+                "fields": "=trace_id, job, actor, target, region, host, message, timestamp, parseError, raw",
+                "options": {}
+            },
+            "name": "Insert to Telemetry DB",
+            "type": "n8n-nodes-base.mongoDb",
+            "typeVersion": 1.2,
+            "position": [288, 128],
+            "id": "751a7105-ca23-44b0-9fff-cbc1dc362a42"
+        },
+        {
+            "parameters": {
+                "topic": "telemetry-local-db-raw",
+                "groupId": "n8n‑telemetry‑processor",
+                "options": {
+                    "fromBeginning": true,
+                    "jsonParseMessage": true,
+                    "parallelProcessing": false,
+                    "onlyMessage": false
+                }
+            },
+            "type": "n8n-nodes-base.kafkaTrigger",
+            "typeVersion": 1.1,
+            "position": [-576, 224],
+            "id": "0ca2ed21-96c7-4ed1-b047-3060119ce7b6",
+            "name": "Kafka Trigger"
+        },
+        {
+            "parameters": {
+                "mode": "runOnceForEachItem",
+                "jsCode": "// Code Node — Mode: Run Once for Each Item\nconst item = $input.item.json;\n\nconst now = Date.now();\nconst ingestTimestamp    = item.ingestTimestamp    || now;\nconst normalizedTimestamp = item.normalizedTimestamp || now;\n\nconst parseError = item.parseError === true;\nconst success    = !parseError && item.trace_id != null;\nconst latencyMs  = success ? (normalizedTimestamp - ingestTimestamp) : null;\n\nconst metric = {\n  timestamp:          now,\n  totalCount:         1,\n  ingestCount:        1,\n  transformSuccess:   success ? 1 : 0,\n  errorCount:         parseError ? 1 : 0,\n  latencyMs:          latencyMs,\n  trace_id:           item.trace_id || null,\n  job:                item.job        || null,\n  actor:              item.actor      || null,\n  target:             item.target     || null,\n  region:             item.region     || null,\n  host:               item.host       || null,\n  message:            item.message    || null,\n  // add more fields if needed\n};\n\nreturn { json: metric };\n"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [288, 320],
+            "id": "625a0274-4644-4de5-aca4-9522c2eb280f",
+            "name": "Capture Metrics"
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://logs-prod-026.grafana.net/loki/api/v1/push",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpBearerAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{\n  {\n  \"streams\": [\n    {\n      \"stream\": {\n        \"job\": $json[\"job\"] || \"unknown\",\n        \"actor\": $json[\"actor\"] || \"unknown\",\n        \"target\": $json[\"target\"] || \"unknown\",\n        \"region\": $json[\"region\"] || \"unknown\",\n        \"host\": $json[\"host\"] || \"unknown\"\n      },\n      \"values\": [\n        [\n          String($json[\"timestamp\"]) + \"000000\",\n          $json[\"message\"] || \"\"\n        ]\n      ]\n    }\n  ]\n}\n}}",
+                "options": {
+                    "response": {
+                        "response": {
+                            "fullResponse": true
+                        }
+                    }
+                }
+            },
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.3,
+            "position": [528, 464],
+            "id": "8a2e225f-42a0-4a3a-bddf-ff703749cacb",
+            "name": "HTTP Request"
+        }
+    ],
+    "pinData": {},
+    "connections": {
+        "Google Gemini Chat Model": {
+            "ai_languageModel": [
+                [
+                    {
+                        "node": "Transform & Normalise",
+                        "type": "ai_languageModel",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Transform & Normalise": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Normalised Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Normalised Response": {
+            "main": [
+                [
+                    {
+                        "node": "Insert to Telemetry DB",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Capture Metrics",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Kafka Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Transform & Normalise",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Capture Metrics": {
+            "main": [
+                [
+                    {
+                        "node": "HTTP Request",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "HTTP Request": {
+            "main": [[]]
+        }
+    },
+    "active": true,
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "versionId": "14dc8a38-e475-40d1-b1af-cc8251d13859",
+    "meta": {
+        "templateCredsSetupCompleted": true,
+        "instanceId": "522f780d16fcebd6e5c1aae203ce119f19c3608476a223f2ba200873bc2bea16"
+    },
+    "id": "SQfht96Zt9VVPcOE",
+    "tags": []
+}

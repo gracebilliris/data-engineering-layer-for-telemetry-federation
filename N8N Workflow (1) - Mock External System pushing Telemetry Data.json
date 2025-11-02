@@ -1,0 +1,519 @@
+{
+    "name": "Mock External System pushing Telemetry Data",
+    "nodes": [
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://logs-prod-026.grafana.net/loki/api/v1/push",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpBasicAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ $json }}",
+                "options": {
+                    "response": {
+                        "response": {
+                            "fullResponse": true,
+                            "responseFormat": "json"
+                        }
+                    }
+                }
+            },
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.3,
+            "position": [-1424, 608],
+            "id": "c98a6227-d0c1-4d66-bdc0-89284e712897",
+            "name": "HTTP Request",
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "language": "python",
+                "pythonCode": "# Access current item's JSON\nitem = _input.item.json  # this is a normal dict\n\nurls = [\n    \"https://telemetry-data.free.beeceptor.com/api/event_logs\",\n    \"https://telemetry-data.free.beeceptor.com/api/traces\"\n]\n\n# Use length of a field in the item to pseudo-randomly pick a URL\nkey = str(item)  # convert the whole item dict to string\nindex = sum(ord(c) for c in key) % len(urls)\n\nselected_url = urls[index]\n\n# Return a properly formatted list of items\nreturn [{\"url\": selected_url}]"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-2592, 512],
+            "id": "1b373345-2b8b-487a-9135-357dccea3349",
+            "name": "Random API Selector",
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "url": "={{ $json.url }}",
+                "responseFormat": "string",
+                "options": {}
+            },
+            "name": "Get Beeceptor API Endpoint with Telemetry",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 1,
+            "position": [-2368, 512],
+            "id": "79ca72c3-591c-4f80-a8d4-191b3f600e39",
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "mode": "runOnceForEachItem",
+                "jsCode": "// Access the current input item\nconst item = $input.item;\n\n// Extract the output object from the Normalisation AI Agent\nconst data = item.json.output || {};\n\n// Convert timestamp (milliseconds → nanoseconds)\nconst ts_ns = String((data.timestamp || Date.now()) * 1e6);\n\n// Build the Loki push payload (wrapped in \"streams\" array)\nreturn {\n  streams: [\n    {\n      stream: {\n        job: data.job || \"unknown\",\n        actor: data.actor || \"unknown\",\n        target: data.target || \"unknown\",\n        region: data.region || \"unknown\",\n        host: data.host || \"unknown\"\n      },\n      values: [\n        [ts_ns, data.message || \"No message\"]\n      ]\n    }\n  ]\n};"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-1648, 608],
+            "id": "c1a447e7-6017-4430-b7ad-c80c92bd0071",
+            "name": "Convert to Loki",
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "operation": "insert",
+                "collection": "telemetry_data",
+                "fields": "=job,actor,target,region,host,trace_id,message,timestamp",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.mongoDb",
+            "typeVersion": 1.2,
+            "position": [-1424, 416],
+            "id": "7e1d1aca-027b-4da2-a195-c9cf6490c221",
+            "name": "Insert documents",
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "promptType": "define",
+                "text": "=You are a JSON normalisation agent. You will receive a JSON object of arbitrary structure from one of several telemetry APIs.\n\nYour task is to output a JSON object with **only the fields that exist in the input** from the following list:\n\n- job\n- actor\n- target\n- region\n- host\n- trace_id\n- message\n- timestamp\n\nRules:\n\n1. Include a field **only if it exists** in the input JSON; do **not** fill in missing fields.\n2. Output **pure JSON only** — no markdown, no code fences, no text, no commentary.\n3. Convert timestamps to nanoseconds if present; otherwise omit the `timestamp` field.\n4. For fields nested inside other objects (e.g., `source_agent` → `actor`, `target_agent` → `target`), extract them if they exist.\n\nExample:\n\nInput JSON:\n\n{\n  \"timestamp\": 1678886400000,\n  \"source_agent\": \"system_worker_01\",\n  \"target_agent\": \"user_data_blob_store\",\n  \"event_type\": \"data_processing_batch\",\n  \"message\": \"Successfully processed batch of 1000 records.\"\n}\n\nCorrect Output:\n\n{\n  \"job\": \"data_processing_batch\",\n  \"actor\": \"system_worker_01\",\n  \"target\": \"user_data_blob_store\",\n  \"message\": \"Successfully processed batch of 1000 records.\",\n  \"timestamp\": 1678886400000\n}\n\nInput JSON to normalise:\n{{ $json }}\n",
+                "hasOutputParser": true,
+                "options": {}
+            },
+            "type": "@n8n/n8n-nodes-langchain.agent",
+            "typeVersion": 3,
+            "position": [-2112, 304],
+            "id": "3323742d-6f45-4972-bbea-1fe340d24103",
+            "name": "Normalisation AI Agent",
+            "alwaysOutputData": false,
+            "retryOnFail": false,
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "batchSize": 10,
+                "options": {}
+            },
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [-2816, 512],
+            "id": "b135e28e-c818-43ec-b795-063075cee2fb",
+            "name": "Loop Over Items",
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "jsCode": "// Get all input items\nconst items = $input.all();\n\n// Map each item to a flattened object\nconst outputItems = items.map(item => {\n  const obj = item.json.output;   // access the nested \"output\" object\n  return {\n    json: {\n      job:      obj.job,\n      actor:    obj.actor,\n      target:   obj.target,\n      region:   obj.region,\n      host:     obj.host,\n      trace_id: obj.trace_id,\n      message:  obj.message,\n      timestamp: obj.timestamp,\n    }\n  };\n});\n\n// Return the new array of items\nreturn outputItems;"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-1648, 416],
+            "id": "65e46934-f515-4466-a6ab-125104688653",
+            "name": "Unnest JSON for MongoDB Insert Format",
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "minutes"
+                        }
+                    ]
+                }
+            },
+            "name": "Schedule Trigger",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1,
+            "position": [-3504, 224],
+            "id": "d7927a68-df0e-4924-841a-1145f7ee6975",
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "url": "={{ $json.url }}",
+                "responseFormat": "string",
+                "options": {}
+            },
+            "name": "Fetch Raw Telemetry",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 1,
+            "position": [-2624, 1200],
+            "id": "bfecf932-9e32-418d-ad35-d1c3cd992433",
+            "executeOnce": false,
+            "alwaysOutputData": false
+        },
+        {
+            "parameters": {
+                "mode": "runOnceForEachItem",
+                "jsCode": "// n8n Code Node — Mode: Run Once for Each Item\nconst item = $input.item.json;\n\nconst doc = {\n  ingestTimestamp: Date.now(),\n  raw:             null,\n  parseError:      false,\n  errorMessage:    null\n};\n\n// 1. Determine the raw data representation\nlet rawData = null;\nif (item.data !== undefined) {\n  rawData = item.data;\n} else if (item.raw !== undefined) {\n  rawData = item.raw;\n} else {\n  rawData = item;\n}\ndoc.raw = rawData;\n\n// 2. Prepare extracted document\nlet extracted = {};\n\n// 3. If the rawData is a string, try parsing as JSON (or fallback)\nif (typeof rawData === 'string') {\n  try {\n    extracted = JSON.parse(rawData);\n  } catch(err) {\n    // cannot parse string → keep as raw in extracted\n    doc.parseError    = true;\n    doc.errorMessage  = `JSON.parse failed on raw string: ${err.message}`;\n    extracted = { rawString: rawData };\n  }\n} else if (typeof rawData === 'object' && rawData !== null) {\n  extracted = rawData;\n} else {\n  // unexpected type\n  doc.parseError    = true;\n  doc.errorMessage  = `Unsupported data type for rawData: ${typeof rawData}`;\n  extracted = { rawValue: rawData };\n}\n\n// 4. Copy all key/value pairs from extracted to doc (dynamic extraction)\nfor (const [key, value] of Object.entries(extracted)) {\n  doc[key] = value;\n}\n\n// 5. Return result\nreturn { json: doc };\n"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-2080, 1216],
+            "id": "b51f66dc-db77-48f0-bae5-8887e1124346",
+            "name": "Format For MongoDB"
+        },
+        {
+            "parameters": {
+                "operation": "insert",
+                "collection": "local_raw",
+                "fields": "=ingestTimestamp, raw, parseError, errorMessage, span_id, parent_span_id, agent_id, operation, target_agent_id, start_time, end_time, status",
+                "options": {}
+            },
+            "name": "Insert to Local DB",
+            "type": "n8n-nodes-base.mongoDb",
+            "typeVersion": 1.2,
+            "position": [-1824, 1216],
+            "id": "9ba92677-d603-427d-aa33-ce1f5bbb8e21"
+        },
+        {
+            "parameters": {
+                "options": {}
+            },
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [-2336, 1200],
+            "id": "2a0ed4d6-4c8a-4f38-be3e-1409151d5924",
+            "name": "Loop over API Data"
+        },
+        {
+            "parameters": {
+                "jsonSchemaExample": "{\n  \"job\": \"data_processing_batch\",\n  \"actor\": \"system_worker_01\",\n  \"target\": \"user_data_blob_store\",\n  \"region\": \"us-east-1\",\n  \"host\": \"ip-172-31-40-10.ec2.internal\",\n  \"trace_id\": \"e4b6d7a2-f8c9-4e01-b23a-5d6f7c8e9d0a\",\n  \"message\": \"Successfully processed batch of 1000 records.\",\n  \"timestamp\": 1678886400000\n}\n",
+                "autoFix": true
+            },
+            "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+            "typeVersion": 1.3,
+            "position": [-2016, 528],
+            "id": "44a6d3f3-029d-4d47-b908-923b9ad1e804",
+            "name": "Structured Output Parser (old)",
+            "disabled": true
+        },
+        {
+            "parameters": {
+                "jsCode": "const endpoints = [\n  \"https://mp68e33da218da805f9c.free.beeceptor.com/api/traces\",\n \"https://mp68e33da218da805f9c.free.beeceptor.com/api/event_logs\"\n];\nreturn endpoints.map(url => ({ json: { url } }));"
+            },
+            "name": "Endpoint Selector (1)",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-3104, -16],
+            "id": "288ea679-37ff-4049-931c-001bea80e5f2"
+        },
+        {
+            "parameters": {
+                "jsCode": "const endpoints = [\n  \"https://telemetry-data.free.beeceptor.com/api/traces\",\n \"https://telemetry-data.free.beeceptor.com/api/event_logs\"\n];\nreturn endpoints.map(url => ({ json: { url } }));"
+            },
+            "name": "Endpoint Selector (2)",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-3072, 384],
+            "id": "d1993534-7ae0-4710-b168-89d32cc90d5b"
+        },
+        {
+            "parameters": {
+                "jsCode": "const endpoints = [\n  \"https://mpe30e0a8e03c7f670c9.free.beeceptor.com/api/event_logs\",\n \"https://mpe30e0a8e03c7f670c9.free.beeceptor.com/api/traces\"\n];\nreturn endpoints.map(url => ({ json: { url } }));"
+            },
+            "name": "Endpoint Selector (3)",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-3120, 592],
+            "id": "f5ff4e4c-88e4-469d-85f6-9f3ef1f09cc0"
+        },
+        {
+            "parameters": {
+                "jsCode": "const endpoints = [\n  \"https://tele-data.free.beeceptor.com/api/event_logs\",\n \"https://tele-data.free.beeceptor.com/api/traces\"\n];\nreturn endpoints.map(url => ({ json: { url } }));"
+            },
+            "name": "Endpoint Selector (4)",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-3120, 784],
+            "id": "e32fb83e-6cb3-4f64-8600-aea3aaecf3f6"
+        },
+        {
+            "parameters": {
+                "topic": "telemetry-local-db-raw",
+                "sendInputData": "={{ JSON.stringify($json) }}",
+                "options": {}
+            },
+            "name": "Publish to Kafka Topic",
+            "type": "n8n-nodes-base.kafka",
+            "typeVersion": 1,
+            "position": [-1584, 1216],
+            "id": "f7b87f30-d6c4-4189-8195-8c168e87e837",
+            "credentials": {
+                "kafka": {
+                    "id": "8xBZIkN62RexxLzc",
+                    "name": "Kafka account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "const endpoints = [\n  \"https://mp774f7465a763522952.free.beeceptor.com/api/event_logs\",\n  \"https://mp774f7465a763522952.free.beeceptor.com/api/traces\"\n];\nreturn endpoints.map(url => ({ json: { url } }));"
+            },
+            "name": "Endpoint Selector (5)",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-3120, 160],
+            "id": "0c0eb9b2-aeb1-4de6-8a2d-a155447a518d"
+        },
+        {
+            "parameters": {},
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [-3104, 1200],
+            "id": "470d8103-39c2-464c-ac6c-2838c3a8c345",
+            "name": "When clicking ‘Execute workflow’"
+        },
+        {
+            "parameters": {
+                "jsCode": "const endpoints = [ \"https://mp741e6cdab421909cc7.free.beeceptor.com/api/event_logs\",\n\"https://mp741e6cdab421909cc7.free.beeceptor.com/api/traces\"\n];\nreturn endpoints.map(url => ({ json: { url } }));"
+            },
+            "name": "Endpoint Selector (6)",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-3312, 784],
+            "id": "bf0e8010-ba1e-457c-8a9f-48c0382be1e8"
+        },
+        {
+            "parameters": {
+                "jsCode": "const endpoints = [\n  \"https://mp67deccbcfea4b8e3df.free.beeceptor.com/api/traces\",\n \"https://mp67deccbcfea4b8e3df.free.beeceptor.com/api/event_logs\"\n];\nreturn endpoints.map(url => ({ json: { url } }));"
+            },
+            "name": "Endpoint Selector",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-2864, 1200],
+            "id": "6aa8e8ca-d679-4b23-a3a7-fb963731e77d"
+        }
+    ],
+    "pinData": {},
+    "connections": {
+        "HTTP Request": {
+            "main": [[]]
+        },
+        "Random API Selector": {
+            "main": [
+                [
+                    {
+                        "node": "Get Beeceptor API Endpoint with Telemetry",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Beeceptor API Endpoint with Telemetry": {
+            "main": [
+                [
+                    {
+                        "node": "Normalisation AI Agent",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Convert to Loki": {
+            "main": [
+                [
+                    {
+                        "node": "HTTP Request",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Normalisation AI Agent": {
+            "main": [
+                [
+                    {
+                        "node": "Convert to Loki",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Unnest JSON for MongoDB Insert Format",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Loop Over Items": {
+            "main": [
+                [],
+                [
+                    {
+                        "node": "Random API Selector",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Unnest JSON for MongoDB Insert Format": {
+            "main": [
+                [
+                    {
+                        "node": "Insert documents",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Schedule Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Endpoint Selector (2)",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Endpoint Selector (1)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Raw Telemetry": {
+            "main": [
+                [
+                    {
+                        "node": "Loop over API Data",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format For MongoDB": {
+            "main": [
+                [
+                    {
+                        "node": "Insert to Local DB",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Publish to Kafka Topic",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Insert to Local DB": {
+            "main": [
+                [
+                    {
+                        "node": "Publish to Kafka Topic",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Loop over API Data": {
+            "main": [
+                [],
+                [
+                    {
+                        "node": "Format For MongoDB",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Structured Output Parser (old)": {
+            "ai_outputParser": [
+                [
+                    {
+                        "node": "Normalisation AI Agent",
+                        "type": "ai_outputParser",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Endpoint Selector (1)": {
+            "main": [[]]
+        },
+        "Endpoint Selector (2)": {
+            "main": [[]]
+        },
+        "Endpoint Selector (3)": {
+            "main": [[]]
+        },
+        "Endpoint Selector (4)": {
+            "main": [[]]
+        },
+        "Publish to Kafka Topic": {
+            "main": [
+                [
+                    {
+                        "node": "Loop over API Data",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Endpoint Selector (5)": {
+            "main": [[]]
+        },
+        "When clicking ‘Execute workflow’": {
+            "main": [
+                [
+                    {
+                        "node": "Endpoint Selector",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Endpoint Selector (6)": {
+            "main": [[]]
+        },
+        "Endpoint Selector": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Raw Telemetry",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "active": false,
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "versionId": "568e6ddd-d2b7-4ea7-9a5a-573cde9ca15f",
+    "meta": {
+        "templateCredsSetupCompleted": true,
+        "instanceId": "522f780d16fcebd6e5c1aae203ce119f19c3608476a223f2ba200873bc2bea16"
+    },
+    "id": "T6P8dvlbpYY2uoMk",
+    "tags": []
+}
